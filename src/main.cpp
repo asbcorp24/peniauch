@@ -422,8 +422,8 @@ button{background:#4b78e8;border:0;border-radius:10px;padding:12px 18px;color:wh
 <p><a href="/analysis" style="color:#93c5fd">Анализ вокала: ноты и громкость →</a></p>
 <div class="card"><h2>Анализ на ESP32-S3</h2>
 <p class="muted">Обрабатывает reference.wav (моно PCM16, 8–48 кГц) без браузера. Ogg пока требует декодера.</p>
-<button onclick="audio('/api/analyze/wav')">Вычислить ноты и громкость на ESP32</button>
-<a href="/api/analyze/result" style="color:#93c5fd">Скачать результат JSON</a></div>
+<button onclick="audio('/api/analyze/wav')">Вычислить ноты и громкость на ESP32</button><button onclick="audio('/api/analyze/wav?source=recording')">Анализ записи WAV</button>
+<a href="/api/analyze/result" style="color:#93c5fd">Скачать результат JSON</a><a href="/api/analyze/result?source=recording" style="color:#93c5fd">Скачать анализ записи</a></div>
 <button onclick="refresh()">Обновить</button>
 <script>
 async function uploadOgg(){
