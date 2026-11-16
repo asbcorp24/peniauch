@@ -24,7 +24,7 @@ bool stoppingRecord = false;
 uint32_t recordBytes = 0;
 uint32_t stopRequestedAt = 0;
 String recordError;
-constexpr char RECORD_PLUGIN[] = "/v44k1q05.img";
+constexpr char RECORD_PLUGIN[] = "/vs1053b_24k_l.img";
 String playbackError;
 uint32_t playbackBytes = 0;
 File uploadFile;
@@ -138,7 +138,7 @@ bool readPluginWord(File &f, uint16_t &w) {
 }
 bool loadRecorderPlugin(uint16_t &entry) {
   File f = SD.open(RECORD_PLUGIN, FILE_READ);
-  if (!f) { recordError = "Нет /v44k1q05.img на SD"; return false; }
+  if (!f) { recordError = "Нет /vs1053b_24k_l.img на SD"; return false; }
   uint8_t b;
   if (!readPluginByte(f,b) || b!='P' || !readPluginByte(f,b) || b!='&' ||
       !readPluginByte(f,b) || b!='H') {
@@ -288,7 +288,8 @@ void startPlayback() {
   stopPlayback();
   playbackError = "";
   // Explicit fixed filename avoids unsafe paths from HTTP parameters.
-  playbackFile = SD.open("/test.mp3", FILE_READ);
+  const bool oggPlayback = server.uri() == "/api/play/ogg";
+  playbackFile = SD.open(oggPlayback ? "/reference.ogg" : "/test.mp3", FILE_READ);
   if (!playbackFile || playbackFile.isDirectory()) {
     if (playbackFile) playbackFile.close();
     playbackError = "Нет файла /test.mp3";
@@ -571,6 +572,7 @@ void setup() {
   server.on("/api/reference/ogg", HTTP_GET, handleOggDownload);
   server.on("/api/reference", HTTP_GET, handleReferenceDownload);
   server.on("/api/record/start",HTTP_POST,startRecording);
+  server.on("/api/play/ogg",HTTP_POST,startPlayback);
   server.on("/api/record/stop",HTTP_POST,requestStopRecording);
   server.on("/api/record/file",HTTP_GET,[](){
     if(recording || !sdReady || !SD.exists("/recording.ogg")){
