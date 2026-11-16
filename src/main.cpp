@@ -526,26 +526,28 @@ void setup() {
   server.on("/", HTTP_GET, handleRoot);
   server.on("/api/analyze/wav",HTTP_POST,[](){
     if(recording || playing || !sdReady){server.send(409,"text/plain","Device busy");return;}
-    File input=SD.open("/reference.wav",FILE_READ);
+    const bool recorded=server.arg("source")=="recording";
+    File input=SD.open(recorded?"/recording.wav":"/reference.wav",FILE_READ);
     if(!input){server.send(404,"text/plain","reference.wav missing");return;}
-    SD.remove("/reference-analysis.part");
-    File output=SD.open("/reference-analysis.part",FILE_WRITE);
+    SD.remove(recorded?"/recording-analysis.part":"/reference-analysis.part");
+    File output=SD.open(recorded?"/recording-analysis.part":"/reference-analysis.part",FILE_WRITE);
     if(!output){input.close();server.send(500,"text/plain","SD write error");return;}
     String error;
     bool ok=VocalDSP::analyzeWav(input,output,error);
     output.close();input.close();
-    if(!ok){SD.remove("/reference-analysis.part");server.send(422,"text/plain; charset=utf-8",error);return;}
-    SD.remove("/reference-analysis.json");
-    if(!SD.rename("/reference-analysis.part","/reference-analysis.json")){
+    if(!ok){SD.remove(recorded?"/recording-analysis.part":"/reference-analysis.part");server.send(422,"text/plain; charset=utf-8",error);return;}
+    SD.remove(recorded?"/recording-analysis.json":"/reference-analysis.json");
+    if(!SD.rename(recorded?"/recording-analysis.part":"/reference-analysis.part",recorded?"/recording-analysis.json":"/reference-analysis.json")){
       server.send(500,"text/plain","Rename failed");return;
     }
     server.send(200,"text/plain; charset=utf-8","Анализ сохранён на microSD");
   });
   server.on("/api/analyze/result",HTTP_GET,[](){
-    if(!sdReady || !SD.exists("/reference-analysis.json")){
+    const bool recorded=server.arg("source")=="recording";
+    if(!sdReady || !SD.exists(recorded?"/recording-analysis.json":"/reference-analysis.json")){
       server.send(404,"text/plain","No analysis");return;
     }
-    File f=SD.open("/reference-analysis.json",FILE_READ);
+    File f=SD.open(recorded?"/recording-analysis.json":"/reference-analysis.json",FILE_READ);
     if(!f){server.send(500,"text/plain","SD read error");return;}
     server.streamFile(f,"application/json");f.close();
   });
