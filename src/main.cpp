@@ -144,10 +144,10 @@ String jsonStatus() {
   out += ",\"ss_ver\":" + String(codecVersion);
   out += ",\"error\":\"" + codecError + "\"";
   out += ",\"sd_mb\":" + String(sdReady ? SD.cardSize() / (1024ULL * 1024ULL) : 0);
-  out += ",\\"psram_mb\\":" + String(ESP.getPsramSize() / (1024ULL * 1024ULL));
-  out += ",\\"psram_free_kb\\":" + String(ESP.getFreePsram() / 1024);
-  out += ",\\"playing\\":" + String(playing ? "true" : "false");
-  out += ",\\"playback_bytes\\":" + String(playbackBytes);
+  out += ",\"psram_mb\":" + String(ESP.getPsramSize() / (1024ULL * 1024ULL));
+  out += ",\"psram_free_kb\":" + String(ESP.getFreePsram() / 1024);
+  out += ",\"playing\":" + String(playing ? "true" : "false");
+  out += ",\"playback_bytes\":" + String(playbackBytes);
   out += "}";
   return out;
 }
