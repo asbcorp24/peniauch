@@ -1,0 +1,81 @@
+<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>VocalLab · анализ вокала</title>
+<style>body{font:16px system-ui;background:#101827;color:#e7eefc;margin:0;padding:20px}main{max-width:1050px;margin:auto}.panel{background:#1e293b;border-radius:14px;padding:18px;margin:14px 0}button,input{font:inherit;margin:6px;padding:9px;border-radius:8px}button{background:#426bd4;color:white;border:0}canvas{width:100%;height:230px;background:#0c1422;border-radius:8px}small{color:#b3c1d6}a{color:#93c5fd}</style>
+<main><h1>VocalLab — анализ эталона преподавателя</h1><p><a href="/">← Диагностика</a></p>
+<section class="panel"><p>Источник: <input id="file" type="file" accept=".ogg,.wav,.mp3,audio/*"> <button id="recorded">Анализ recording.ogg</button> <button id="reference">Анализ reference.ogg</button></p><p id="status">Выберите запись или загрузите её с ESP32.</p><small>Анализ выполняется локально в браузере. Требуется поддержка декодирования формата браузером. Файлы на сервер не отправляются.</small></section>
+<section class="panel"><h2>Высота звука (F0)</h2><canvas id="pitch" width="960" height="230"></canvas><p id="pitchInfo">—</p></section>
+<section class="panel"><h2>Громкость (RMS, dBFS)</h2><canvas id="volume" width="960" height="230"></canvas><p id="volumeInfo">—</p></section>
+<section class="panel"><button id="save">Скачать данные анализа JSON</button><small>Прототип: F0 определяется автокорреляцией. Точность зависит от голоса, шума и качества записи; результаты не являются оценкой преподавателя.</small></section>
+<script>
+let result=null;
+const status=document.getElementById('status');
+function pitchOf(a,sr){
+ const n=a.length, minLag=Math.max(2,Math.floor(sr/1000)),maxLag=Math.min(n-2,Math.ceil(sr/75));
+ let energy=0;for(let i=0;i<n;i++)energy+=a[i]*a[i];
+ if(Math.sqrt(energy/n)<0.008)return {hz:null,confidence:0};
+ // Normalized difference function (YIN-style), robust to amplitude changes.
+ const d=new Float64Array(maxLag+1);
+ for(let lag=1;lag<=maxLag;lag++){
+  let sum=0;for(let i=0;i<n-lag;i++){const v=a[i]-a[i+lag];sum+=v*v;}
+  d[lag]=sum;
+ }
+ let cumulative=0,best=-1,bestVal=1;
+ for(let lag=1;lag<=maxLag;lag++){
+  cumulative+=d[lag];if(lag<minLag||!cumulative)continue;
+  const val=d[lag]*lag/cumulative;
+  if(val<0.13){best=lag;break;}
+  if(val<bestVal){bestVal=val;best=lag;}
+ }
+ if(best<minLag)return {hz:null,confidence:0};
+ // Recompute normalized error at selected lag for confidence.
+ let sum=0;for(let k=1;k<=best;k++)sum+=d[k];
+ const quality=1-d[best]*best/Math.max(sum,1e-12);
+ if(quality<0.78)return {hz:null,confidence:quality};
+ const offset=best>minLag&&best<maxLag?(d[best-1]-d[best+1])/(2*(d[best-1]-2*d[best]+d[best+1])||1):0;
+ const hz=sr/(best+Math.max(-0.5,Math.min(0.5,offset)));
+ return {hz,confidence:quality};
+}
+function note(hz){if(!hz)return '—';const midi=Math.round(69+12*Math.log2(hz/440));const names=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];return names[(midi%12+12)%12]+(Math.floor(midi/12)-1);}
+function plot(id,points,key,min,max,color){
+ const c=document.getElementById(id),g=c.getContext('2d'),w=c.width,h=c.height;
+ g.clearRect(0,0,w,h);g.strokeStyle='#35445b';g.lineWidth=1;
+ for(let i=0;i<=4;i++){let y=15+(h-30)*i/4;g.beginPath();g.moveTo(0,y);g.lineTo(w,y);g.stroke();}
+ g.strokeStyle=color;g.lineWidth=2;g.beginPath();let drawing=false;
+ for(let i=0;i<points.length;i++){let v=points[i][key];if(v===null||!Number.isFinite(v)){drawing=false;continue;}
+ const x=points.length===1?0:i/(points.length-1)*(w-1),y=15+(max-v)/(max-min)*(h-30);
+ if(!drawing)g.moveTo(x,y);else g.lineTo(x,y);drawing=true;}
+ g.stroke();
+}
+async function analyze(blob,name){
+ status.textContent='Декодирование '+name+'…';result=null;
+ const ctx=new (window.AudioContext||window.webkitAudioContext)();
+ try{
+ const audio=await ctx.decodeAudioData(await blob.arrayBuffer());
+ const sr=audio.sampleRate, channels=audio.numberOfChannels;
+ const mono=new Float32Array(audio.length);
+ for(let ch=0;ch<channels;ch++){const src=audio.getChannelData(ch);for(let i=0;i<mono.length;i++)mono[i]+=src[i]/channels;}
+ const windowSize=Math.round(sr*0.045),hop=Math.round(sr*0.02),frames=[];
+ status.textContent='Измерение F0 и RMS…';
+ for(let start=0;start+windowSize<=mono.length;start+=hop){
+  const frame=mono.subarray(start,start+windowSize);
+  let power=0;for(let i=0;i<frame.length;i++)power+=frame[i]*frame[i];
+  const rms=Math.sqrt(power/frame.length);
+  const p=pitchOf(frame,sr);
+  frames.push({time:+((start+windowSize/2)/sr).toFixed(3),hz:p.hz?+p.hz.toFixed(2):null,note:note(p.hz),confidence:+p.confidence.toFixed(3),rmsDb:+(20*Math.log10(Math.max(rms,1e-8))).toFixed(2)});
+  if(frames.length%40===0){status.textContent='Обработано '+Math.round(100*start/mono.length)+'%';await new Promise(r=>setTimeout(r,0));}
+ }
+ result={version:1,source:name,duration:audio.duration,sampleRate:sr,hopSeconds:hop/sr,algorithm:'YIN-style CMND prototype',frames};
+ const voiced=frames.filter(f=>f.hz!==null),hz=voiced.map(f=>f.hz).sort((a,b)=>a-b);
+ const lo=hz.length?Math.max(60,hz[Math.floor(hz.length*.02)]*.8):75;
+ const hi=hz.length?Math.max(lo+80,hz[Math.floor(hz.length*.98)]*1.2):1000;
+ plot('pitch',frames,'hz',lo,hi,'#70d5ff');plot('volume',frames,'rmsDb',-80,0,'#80edac');
+ document.getElementById('pitchInfo').textContent='Озвученных кадров: '+voiced.length+'/'+frames.length+(hz.length?' · медиана '+hz[Math.floor(hz.length/2)].toFixed(1)+' Гц ('+note(hz[Math.floor(hz.length/2)])+')':'');
+ document.getElementById('volumeInfo').textContent='Длительность: '+audio.duration.toFixed(2)+' с · шаг анализа ~20 мс · dBFS';
+ status.textContent='Готово: '+frames.length+' кадров';
+ }finally{await ctx.close();}
+}
+document.getElementById('file').onchange=async e=>{const f=e.target.files[0];if(f)try{await analyze(f,f.name)}catch(err){status.textContent='Ошибка: '+err.message;}};
+for(const [id,path] of [['recorded','/api/record/file'],['reference','/api/reference/ogg']]){
+ document.getElementById(id).onclick=async()=>{try{const r=await fetch(path);if(!r.ok)throw Error('HTTP '+r.status);await analyze(await r.blob(),path);}catch(e){status.textContent='Ошибка: '+e.message;}};
+}
+document.getElementById('save').onclick=()=>{if(!result){status.textContent='Сначала выполните анализ';return;}const blob=new Blob([JSON.stringify(result)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='reference-analysis.json';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);};
+</script></main>
