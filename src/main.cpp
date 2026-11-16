@@ -19,6 +19,7 @@ bool playing = false;
 String playbackError;
 uint32_t playbackBytes = 0;
 File uploadFile;
+String uploadTarget = "/reference.wav";
 bool uploadFailed = false;
 size_t uploadBytes = 0;
 constexpr size_t MAX_UPLOAD_BYTES = 12 * 1024 * 1024;
@@ -140,6 +141,7 @@ void startPlayback() {
 }
 
 void handleUploadChunk() {
+  uploadTarget = server.uri() == "/api/reference/ogg" ? "/reference.ogg" : "/reference.wav";
   HTTPUpload &u = server.upload();
   if (u.status == UPLOAD_FILE_START) {
     stopPlayback();
@@ -147,8 +149,8 @@ void handleUploadChunk() {
     uploadBytes = 0;
     if (uploadFile) uploadFile.close();
     if (!uploadFailed) {
-      SD.remove("/reference.wav");
-      uploadFile = SD.open("/reference.wav", FILE_WRITE);
+      SD.remove(uploadTarget.c_str());
+      uploadFile = SD.open(uploadTarget.c_str(), FILE_WRITE);
       uploadFailed = !uploadFile;
     }
   } else if (u.status == UPLOAD_FILE_WRITE) {
@@ -175,7 +177,19 @@ void handleUploadComplete() {
     server.send(400, "text/plain; charset=utf-8", "Ошибка записи или размер превышает 12 МБ");
     return;
   }
-  server.send(200, "text/plain; charset=utf-8", "Эталон сохранён: " + String(uploadBytes) + " байт");
+  server.send(200, "text/plain; charset=utf-8", "Файл сохранён: " + uploadTarget + " (" + String(uploadBytes) + " байт)");
+}
+
+void handleOggDownload() {
+  if (!sdReady || !SD.exists("/reference.ogg")) {
+    server.send(404, "text/plain; charset=utf-8", "Ogg отсутствует");
+    return;
+  }
+  stopPlayback();
+  File file = SD.open("/reference.ogg", FILE_READ);
+  if (!file) { server.send(500, "text/plain", "SD read error"); return; }
+  server.streamFile(file, "audio/ogg");
+  file.close();
 }
 
 void handleReferenceDownload() {
@@ -239,6 +253,15 @@ button{background:#4b78e8;border:0;border-radius:10px;padding:12px 18px;color:wh
 <p class="muted">Появится после проверки аппаратного подключения и микрофонного тракта.</p></div>
 <button onclick="refresh()">Обновить</button>
 <script>
+async function uploadOgg(){
+  const f=document.getElementById('ogg').files[0], msg=document.getElementById('oggStatus');
+  if(!f){msg.textContent='Выберите Ogg';return;}
+  if(f.size>12*1024*1024){msg.textContent='Файл больше 12 МБ';return;}
+  const fd=new FormData();fd.append('file',f);
+  msg.textContent='Загрузка...';
+  try {const r=await fetch('/api/reference/ogg',{method:'POST',body:fd});msg.textContent=await r.text();}
+  catch(e){msg.textContent=String(e);}
+}
 async function uploadWav(){
   const f=document.getElementById('wav').files[0];
   const msg=document.getElementById('uploadStatus');
@@ -337,6 +360,8 @@ void setup() {
     server.send(200, "text/plain; charset=utf-8", "Остановлено");
   });
   server.on("/api/reference", HTTP_POST, handleUploadComplete, handleUploadChunk);
+  server.on("/api/reference/ogg", HTTP_POST, handleUploadComplete, handleUploadChunk);
+  server.on("/api/reference/ogg", HTTP_GET, handleOggDownload);
   server.on("/api/reference", HTTP_GET, handleReferenceDownload);
   server.begin();
 }
