@@ -5,6 +5,7 @@
 #include <WebServer.h>
 #include "pins.h"
 #include "analysis_page.h"
+#include "vocal_dsp.h"
 
 namespace {
 constexpr char WIFI_SSID[] = "VocalLab";
@@ -421,6 +422,10 @@ button{background:#4b78e8;border:0;border-radius:10px;padding:12px 18px;color:wh
 <div class="card"><h2>Запись вокала</h2>
 <p class="muted">Появится после проверки аппаратного подключения и микрофонного тракта.</p></div>
 <p><a href="/analysis" style="color:#93c5fd">Анализ вокала: ноты и громкость →</a></p>
+<div class="card"><h2>Анализ на ESP32-S3</h2>
+<p class="muted">Обрабатывает reference.wav (моно PCM16, 8–48 кГц) без браузера. Ogg пока требует декодера.</p>
+<button onclick="audio('/api/analyze/wav')">Вычислить ноты и громкость на ESP32</button>
+<a href="/api/analyze/result" style="color:#93c5fd">Скачать результат JSON</a></div>
 <button onclick="refresh()">Обновить</button>
 <script>
 async function uploadOgg(){
@@ -521,6 +526,31 @@ void setup() {
   Serial.printf("Wi-Fi AP: %s http://%s\n",
                 WIFI_SSID, WiFi.softAPIP().toString().c_str());
   server.on("/", HTTP_GET, handleRoot);
+  server.on("/api/analyze/wav",HTTP_POST,[](){
+    if(recording || playing || !sdReady){server.send(409,"text/plain","Device busy");return;}
+    File input=SD.open("/reference.wav",FILE_READ);
+    if(!input){server.send(404,"text/plain","reference.wav missing");return;}
+    SD.remove("/reference-analysis.part");
+    File output=SD.open("/reference-analysis.part",FILE_WRITE);
+    if(!output){input.close();server.send(500,"text/plain","SD write error");return;}
+    String error;
+    bool ok=VocalDSP::analyzeWav(input,output,error);
+    output.close();input.close();
+    if(!ok){SD.remove("/reference-analysis.part");server.send(422,"text/plain; charset=utf-8",error);return;}
+    SD.remove("/reference-analysis.json");
+    if(!SD.rename("/reference-analysis.part","/reference-analysis.json")){
+      server.send(500,"text/plain","Rename failed");return;
+    }
+    server.send(200,"text/plain; charset=utf-8","Анализ сохранён на microSD");
+  });
+  server.on("/api/analyze/result",HTTP_GET,[](){
+    if(!sdReady || !SD.exists("/reference-analysis.json")){
+      server.send(404,"text/plain","No analysis");return;
+    }
+    File f=SD.open("/reference-analysis.json",FILE_READ);
+    if(!f){server.send(500,"text/plain","SD read error");return;}
+    server.streamFile(f,"application/json");f.close();
+  });
   server.on("/analysis", HTTP_GET, [](){
     server.sendHeader("Content-Encoding","gzip");
     server.sendHeader("Cache-Control","no-store");
