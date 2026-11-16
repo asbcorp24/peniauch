@@ -185,55 +185,52 @@ void abortRecording(const String &reason) {
 
 void serviceRecording() {
   if (!recording) return;
-  uint16_t waiting = 0;
-  if (!readSci(0x09, waiting)) { abortRecording("HDAT1 timeout"); return; }
-  uint16_t flags = 0;
+  uint16_t availableWords=0;
+  if (!readSci(0x09,availableWords)) {abortRecording("PCM FIFO timeout");return;}
+  uint16_t flags=0;
   if (stoppingRecord) {
-    if (!readSci(0x0F, flags)) { abortRecording("AICTRL3 timeout"); return; }
-    if (millis() - stopRequestedAt > 5000) { abortRecording("Stop timeout"); return; }
+    if (!readSci(0x0F,flags)) {abortRecording("PCM stop status timeout");return;}
+    if (millis()-stopRequestedAt>10000) {abortRecording("PCM stop timeout");return;}
   }
-  const bool finished = stoppingRecord && (flags & 0x0002);
-  // While recording, only drain full 256-word blocks.
-  // On final drain, leave the last word for odd-byte handling.
-  if (!finished && waiting < 256) return;
-  uint16_t count = finished ? waiting : uint16_t((waiting / 256) * 256);
-  count = min(uint16_t(256), count);
-  if (finished && count == waiting && count) count--;
-  uint8_t buf[512];
-  for (uint16_t i=0;i<count;i++) {
+  bool finished=stoppingRecord && (flags&2);
+  if (availableWords<256 && !finished) return;
+  uint16_t count=min(uint16_t(256),availableWords);
+  uint8_t bytes[512];
+  for(uint16_t i=0;i<count;i++){
     uint16_t w;
-    if (!readSci(0x08,w)) { abortRecording("HDAT0 timeout"); return; }
-    buf[i*2] = w >> 8;
-    buf[i*2+1] = w & 0xFF;
+    if(!readSci(0x08,w)){abortRecording("PCM data timeout");return;}
+    bytes[2*i]=uint8_t(w>>8);bytes[2*i+1]=uint8_t(w);
   }
-  if (count && recordFile.write(buf,count*2) != count*2) {
-    abortRecording("SD write failed"); return;
+  if(count && recordFile.write(bytes,count*2)!=count*2){
+    abortRecording("PCM SD write failed");return;
   }
-  recordBytes += count*2;
-  if (!finished) return;
-  // If a full block was drained, there may still be words to collect.
-  if (waiting > count + 1) return;
-  if (waiting) {
-    uint16_t last;
-    if (!readSci(0x08,last)) { abortRecording("Final word read failed"); return; }
-    const bool odd = (flags & 0x0004) == 0;
-    uint8_t tail[2] = {uint8_t(last >> 8),uint8_t(last)};
-    size_t n = odd ? 1 : 2;
-    if (recordFile.write(tail,n) != n) { abortRecording("Final write failed"); return; }
-    recordBytes += n;
+  recordBytes+=count*2;
+  if(!finished || availableWords>count)return;
+  recordFile.flush();recordFile.close();
+  recording=false;stoppingRecord=false;
+  if(recordBytes<44){recordError="WAV too short";SD.remove("/recording.part");return;}
+  File wav=SD.open("/recording.part","r+");
+  uint8_t header[44];
+  if(!wav || wav.read(header,44)!=44 || memcmp(header,"RIFF",4) ||
+     memcmp(header+8,"WAVE",4) || memcmp(header+36,"data",4)){
+    if(wav)wav.close();
+    recordError="Invalid PCM WAV header";SD.remove("/recording.part");return;
   }
-  recordFile.flush();
-  recordFile.close();
-  recording = false;
-  stoppingRecord = false;
-  if (recordBytes < 32) { SD.remove("/recording.part"); recordError="Пустая запись"; return; }
-  File verify = SD.open("/recording.part", FILE_READ);
-  uint8_t magic[4]={};
-  bool valid = verify && verify.read(magic,4)==4 && memcmp(magic,"OggS",4)==0;
-  if (verify) verify.close();
-  if (!valid) { SD.remove("/recording.part"); recordError="Нет заголовка OggS"; return; }
-  SD.remove("/recording.ogg");
-  if (!SD.rename("/recording.part","/recording.ogg")) recordError="Ошибка переименования";
+  uint8_t sizes[4];
+  auto patch=[&](uint32_t offset,uint32_t value){
+    for(int i=0;i<4;i++)sizes[i]=uint8_t(value>>(i*8));
+    return wav.seek(offset)&&wav.write(sizes,4)==4;
+  };
+  bool ok=patch(4,recordBytes-8)&&patch(40,recordBytes-44);
+  wav.flush();wav.close();
+  if(!ok){recordError="WAV header write failed";return;}
+  SD.remove("/recording.wav");
+  if(!SD.rename("/recording.part","/recording.wav")){
+    recordError="WAV rename failed";return;
+  }
+  digitalWrite(PIN_XRST,LOW);delay(10);
+  digitalWrite(PIN_XRST,HIGH);delay(100);
+  testCodec();
 }
 
 void startRecording() {
