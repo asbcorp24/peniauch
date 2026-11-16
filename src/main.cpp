@@ -4,6 +4,7 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include "pins.h"
+#include "analysis_page.h"
 
 namespace {
 constexpr char WIFI_SSID[] = "VocalLab";
@@ -419,6 +420,7 @@ button{background:#4b78e8;border:0;border-radius:10px;padding:12px 18px;color:wh
 <p id="playback">—</p></div>
 <div class="card"><h2>Запись вокала</h2>
 <p class="muted">Появится после проверки аппаратного подключения и микрофонного тракта.</p></div>
+<p><a href="/analysis" style="color:#93c5fd">Анализ вокала: ноты и громкость →</a></p>
 <button onclick="refresh()">Обновить</button>
 <script>
 async function uploadOgg(){
@@ -519,6 +521,12 @@ void setup() {
   Serial.printf("Wi-Fi AP: %s http://%s\n",
                 WIFI_SSID, WiFi.softAPIP().toString().c_str());
   server.on("/", HTTP_GET, handleRoot);
+  server.on("/analysis", HTTP_GET, [](){
+    server.sendHeader("Content-Encoding","gzip");
+    server.sendHeader("Cache-Control","no-store");
+    server.send_P(200,"text/html; charset=utf-8",
+                  reinterpret_cast<const char*>(ANALYSIS_HTML_GZ), ANALYSIS_HTML_GZ_SIZE);
+  });
   server.on("/api/status", HTTP_GET, [](){
     server.sendHeader("Cache-Control","no-store");
     server.send(200,"application/json",jsonStatus());
