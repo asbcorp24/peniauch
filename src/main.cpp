@@ -14,6 +14,10 @@ WebServer server(80);
 
 bool codecReady = false;
 bool sdReady = false;
+File playbackFile;
+bool playing = false;
+String playbackError;
+uint32_t playbackBytes = 0;
 uint16_t statusRegister = 0xFFFF;
 uint8_t codecVersion = 0;
 String codecError;
@@ -68,6 +72,69 @@ void testCodec() {
   if (!codecReady) codecError = "Unexpected SCI_STATUS SS_VER";
 }
 
+bool writeSci(uint8_t address, uint16_t value) {
+  if (!waitDreq()) return false;
+  deselectAll();
+  spi.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+  digitalWrite(PIN_XCS, LOW);
+  spi.transfer(0x02);
+  spi.transfer(address);
+  spi.transfer(value >> 8);
+  spi.transfer(value & 0xFF);
+  digitalWrite(PIN_XCS, HIGH);
+  spi.endTransaction();
+  return waitDreq();
+}
+
+void stopPlayback() {
+  if (playbackFile) playbackFile.close();
+  playing = false;
+}
+
+void servicePlayback() {
+  if (!playing) return;
+  // Small, bounded SDI chunks keep HTTP responsive.
+  for (int batch = 0; batch < 4 && playing; ++batch) {
+    if (!digitalRead(PIN_DREQ)) break;
+    uint8_t buf[32];
+    int n = playbackFile.read(buf, sizeof(buf));
+    if (n <= 0) { stopPlayback(); break; }
+    deselectAll();
+    spi.beginTransaction(SPISettings(2000000, MSBFIRST, SPI_MODE0));
+    digitalWrite(PIN_XDCS, LOW);
+    spi.writeBytes(buf, n);
+    digitalWrite(PIN_XDCS, HIGH);
+    spi.endTransaction();
+    playbackBytes += n;
+  }
+}
+
+void startPlayback() {
+  if (!codecReady || !sdReady) {
+    server.send(503, "text/plain; charset=utf-8", "VS1053 или SD недоступны");
+    return;
+  }
+  stopPlayback();
+  playbackError = "";
+  // Explicit fixed filename avoids unsafe paths from HTTP parameters.
+  playbackFile = SD.open("/test.mp3", FILE_READ);
+  if (!playbackFile || playbackFile.isDirectory()) {
+    if (playbackFile) playbackFile.close();
+    playbackError = "Нет файла /test.mp3";
+    server.send(404, "text/plain; charset=utf-8", playbackError);
+    return;
+  }
+  if (!writeSci(0x0B, 0x3030)) { // SCI_VOL: moderate volume
+    stopPlayback();
+    playbackError = "Не удалось установить громкость";
+    server.send(500, "text/plain; charset=utf-8", playbackError);
+    return;
+  }
+  playbackBytes = 0;
+  playing = true;
+  server.send(200, "text/plain; charset=utf-8", "Воспроизведение началось");
+}
+
 String jsonStatus() {
   String out = "{";
   out += "\"codec_ok\":" + String(codecReady ? "true" : "false");
@@ -77,6 +144,10 @@ String jsonStatus() {
   out += ",\"ss_ver\":" + String(codecVersion);
   out += ",\"error\":\"" + codecError + "\"";
   out += ",\"sd_mb\":" + String(sdReady ? SD.cardSize() / (1024ULL * 1024ULL) : 0);
+  out += ",\\"psram_mb\\":" + String(ESP.getPsramSize() / (1024ULL * 1024ULL));
+  out += ",\\"psram_free_kb\\":" + String(ESP.getFreePsram() / 1024);
+  out += ",\\"playing\\":" + String(playing ? "true" : "false");
+  out += ",\\"playback_bytes\\":" + String(playbackBytes);
   out += "}";
   return out;
 }
@@ -99,12 +170,22 @@ button{background:#4b78e8;border:0;border-radius:10px;padding:12px 18px;color:wh
 <p>DREQ: <span id="dreq">—</span></p>
 <p>SCI_STATUS: <span id="status">—</span></p>
 <p>SS_VER: <span id="version">—</span></p>
-<p>Карта: <span id="size">—</span></p>
+<p>Карта: <span id="size">—</span></p><p>PSRAM: <span id="psram">—</span></p>
 <p class="muted" id="error"></p></div>
+<div class="card"><h2>Проверка аудиовыхода</h2>
+<p class="muted">Поместите файл test.mp3 в корень microSD. Подключите наушники.</p>
+<button onclick="audio('/api/play')">Воспроизвести test.mp3</button>
+<button onclick="audio('/api/stop')">Остановить</button>
+<p id="playback">—</p></div>
 <div class="card"><h2>Запись вокала</h2>
 <p class="muted">Появится после проверки аппаратного подключения и микрофонного тракта.</p></div>
 <button onclick="refresh()">Обновить</button>
 <script>
+async function audio(path){
+  try { const r=await fetch(path,{method:'POST'}); document.getElementById('playback').textContent=await r.text(); }
+  catch(e){document.getElementById('playback').textContent=String(e);}
+  refresh();
+}
 async function refresh(){
   try {
     const r=await fetch('/api/status',{cache:'no-store'});
@@ -118,6 +199,8 @@ async function refresh(){
     document.getElementById('status').textContent='0x'+s.sci_status;
     document.getElementById('version').textContent=s.ss_ver;
     document.getElementById('size').textContent=s.sd_mb+' МБ';
+    document.getElementById('psram').textContent=s.psram_mb+' МБ, свободно '+s.psram_free_kb+' КБ';
+    if(s.playing) document.getElementById('playback').textContent='Воспроизведение: '+s.playback_bytes+' байт';
     document.getElementById('error').textContent=s.error||'';
   } catch(e) {document.getElementById('error').textContent=String(e);}
 }
@@ -157,10 +240,16 @@ void setup() {
     server.sendHeader("Cache-Control","no-store");
     server.send(200,"application/json",jsonStatus());
   });
+  server.on("/api/play", HTTP_POST, startPlayback);
+  server.on("/api/stop", HTTP_POST, [](){
+    stopPlayback();
+    server.send(200, "text/plain; charset=utf-8", "Остановлено");
+  });
   server.begin();
 }
 
 void loop() {
   server.handleClient();
-  delay(2);
+  servicePlayback();
+  delay(1);
 }
