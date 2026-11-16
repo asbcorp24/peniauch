@@ -16,6 +16,13 @@ bool codecReady = false;
 bool sdReady = false;
 File playbackFile;
 bool playing = false;
+File recordFile;
+bool recording = false;
+bool stoppingRecord = false;
+uint32_t recordBytes = 0;
+uint32_t stopRequestedAt = 0;
+String recordError;
+constexpr char RECORD_PLUGIN[] = "/v44k1q05.img";
 String playbackError;
 uint32_t playbackBytes = 0;
 File uploadFile;
@@ -114,8 +121,165 @@ void servicePlayback() {
   }
 }
 
+// The VLSI .img plugin is a P&H record stream; not a raw .plg patch.
+bool readPluginByte(File &f, uint8_t &b) {
+  int v = f.read();
+  if (v < 0) return false;
+  b = uint8_t(v);
+  return true;
+}
+bool readPluginWord(File &f, uint16_t &w) {
+  uint8_t hi, lo;
+  if (!readPluginByte(f, hi) || !readPluginByte(f, lo)) return false;
+  w = (uint16_t(hi) << 8) | lo;
+  return true;
+}
+bool loadRecorderPlugin(uint16_t &entry) {
+  File f = SD.open(RECORD_PLUGIN, FILE_READ);
+  if (!f) { recordError = "Нет /v44k1q05.img на SD"; return false; }
+  uint8_t b;
+  if (!readPluginByte(f,b) || b!='P' || !readPluginByte(f,b) || b!='&' ||
+      !readPluginByte(f,b) || b!='H') {
+    recordError = "Некорректный заголовок P&H"; f.close(); return false;
+  }
+  const uint16_t offsets[3] = {0x8000, 0, 0x4000};
+  uint32_t wordsTotal = 0;
+  while (f.available()) {
+    uint8_t type;
+    uint16_t len, addr;
+    if (!readPluginByte(f,type) || !readPluginWord(f,len) || !readPluginWord(f,addr)) break;
+    len &= 0xFFFE;
+    if (type == 3) {
+      f.close(); entry = addr;
+      return wordsTotal > 0 && entry == 0x34;
+    }
+    if (type > 2 || !len || wordsTotal + len/2 > 100000) break;
+    if (!writeSci(0x07, addr + offsets[type])) break; // SCI_WRAMADDR
+    for (uint16_t i=0; i<len/2; i++) {
+      uint16_t w;
+      if (!readPluginWord(f,w) || !writeSci(0x06,w)) {
+        recordError = "Ошибка передачи плагина";
+        f.close(); return false;
+      }
+    }
+    wordsTotal += len/2;
+  }
+  recordError = "Ошибка формата плагина";
+  f.close();
+  return false;
+}
+
+void abortRecording(const String &reason) {
+  recordError = reason;
+  if (recordFile) recordFile.close();
+  SD.remove("/recording.part");
+  recording = false;
+  stoppingRecord = false;
+  // Encoder state cannot be safely resumed without a codec reset.
+  digitalWrite(PIN_XRST, LOW); delay(10);
+  digitalWrite(PIN_XRST, HIGH); delay(100);
+  testCodec();
+}
+
+void serviceRecording() {
+  if (!recording) return;
+  uint16_t waiting = 0;
+  if (!readSci(0x09, waiting)) { abortRecording("HDAT1 timeout"); return; }
+  uint16_t flags = 0;
+  if (stoppingRecord) {
+    if (!readSci(0x0F, flags)) { abortRecording("AICTRL3 timeout"); return; }
+    if (millis() - stopRequestedAt > 5000) { abortRecording("Stop timeout"); return; }
+  }
+  const bool finished = stoppingRecord && (flags & 0x0002);
+  // While recording, only drain full 256-word blocks.
+  // On final drain, leave the last word for odd-byte handling.
+  if (!finished && waiting < 256) return;
+  uint16_t count = finished ? waiting : uint16_t((waiting / 256) * 256);
+  count = min(uint16_t(256), count);
+  if (finished && count == waiting && count) count--;
+  uint8_t buf[512];
+  for (uint16_t i=0;i<count;i++) {
+    uint16_t w;
+    if (!readSci(0x08,w)) { abortRecording("HDAT0 timeout"); return; }
+    buf[i*2] = w >> 8;
+    buf[i*2+1] = w & 0xFF;
+  }
+  if (count && recordFile.write(buf,count*2) != count*2) {
+    abortRecording("SD write failed"); return;
+  }
+  recordBytes += count*2;
+  if (!finished) return;
+  // If a full block was drained, there may still be words to collect.
+  if (waiting > count + 1) return;
+  if (waiting) {
+    uint16_t last;
+    if (!readSci(0x08,last)) { abortRecording("Final word read failed"); return; }
+    const bool odd = (flags & 0x0004) == 0;
+    uint8_t tail[2] = {uint8_t(last >> 8),uint8_t(last)};
+    size_t n = odd ? 1 : 2;
+    if (recordFile.write(tail,n) != n) { abortRecording("Final write failed"); return; }
+    recordBytes += n;
+  }
+  recordFile.flush();
+  recordFile.close();
+  recording = false;
+  stoppingRecord = false;
+  if (recordBytes < 32) { SD.remove("/recording.part"); recordError="Пустая запись"; return; }
+  File verify = SD.open("/recording.part", FILE_READ);
+  uint8_t magic[4]={};
+  bool valid = verify && verify.read(magic,4)==4 && memcmp(magic,"OggS",4)==0;
+  if (verify) verify.close();
+  if (!valid) { SD.remove("/recording.part"); recordError="Нет заголовка OggS"; return; }
+  SD.remove("/recording.ogg");
+  if (!SD.rename("/recording.part","/recording.ogg")) recordError="Ошибка переименования";
+}
+
+void startRecording() {
+  if (recording || playing || !codecReady || !sdReady) {
+    server.send(409,"text/plain; charset=utf-8","Кодек занят или недоступен"); return;
+  }
+  recordError = "";
+  recordBytes = 0;
+  // Recorder initialization resets decoder and loads application from SD.
+  if (!writeSci(0x03,0xC000) || !writeSci(0x02,0) ||
+      !writeSci(0x00,0x0804)) {
+    server.send(500,"text/plain","Ошибка инициализации VS1053"); return;
+  }
+  if (!writeSci(0x0A,0) || !writeSci(0x07,0xC01A) ||
+      !writeSci(0x06,2)) {
+    server.send(500,"text/plain","Ошибка настройки SCI"); return;
+  }
+  uint16_t entry = 0;
+  if (!loadRecorderPlugin(entry)) {
+    server.send(500,"text/plain; charset=utf-8",recordError); return;
+  }
+  SD.remove("/recording.part");
+  recordFile = SD.open("/recording.part",FILE_WRITE);
+  if (!recordFile) { server.send(500,"text/plain","SD open failed"); return; }
+  // Mic input: SM_LINE1=0; SM_ADPCM | SM_SDINEW.
+  if (!writeSci(0x00,0x1004) || !writeSci(0x0C,0x8000) ||
+      !writeSci(0x0D,1024) || !writeSci(0x0E,0) ||
+      !writeSci(0x0F,0) || !writeSci(0x0A,entry)) {
+    abortRecording("Не удалось запустить encoder");
+    server.send(500,"text/plain; charset=utf-8",recordError); return;
+  }
+  recording = true;
+  stoppingRecord = false;
+  server.send(200,"text/plain; charset=utf-8","Запись началась");
+}
+
+void requestStopRecording() {
+  if (!recording || stoppingRecord) {
+    server.send(409,"text/plain; charset=utf-8","Нет активной записи"); return;
+  }
+  if (!writeSci(0x0F,1)) { abortRecording("Stop command failed"); server.send(500,"text/plain",recordError); return; }
+  stoppingRecord = true;
+  stopRequestedAt = millis();
+  server.send(200,"text/plain; charset=utf-8","Завершение Ogg...");
+}
+
 void startPlayback() {
-  if (!codecReady || !sdReady) {
+  if (recording || !codecReady || !sdReady) {
     server.send(503, "text/plain; charset=utf-8", "VS1053 или SD недоступны");
     return;
   }
@@ -220,6 +384,10 @@ String jsonStatus() {
   out += ",\"psram_free_kb\":" + String(ESP.getFreePsram() / 1024);
   out += ",\"playing\":" + String(playing ? "true" : "false");
   out += ",\"playback_bytes\":" + String(playbackBytes);
+  out += ",\\"recording\\":" + String(recording ? "true" : "false");
+  out += ",\\"record_stopping\\":" + String(stoppingRecord ? "true" : "false");
+  out += ",\\"record_bytes\\":" + String(recordBytes);
+  out += ",\\"record_error\\":\\"" + recordError + "\\"";
   out += "}";
   return out;
 }
@@ -315,6 +483,7 @@ async function refresh(){
     document.getElementById('size').textContent=s.sd_mb+' МБ';
     document.getElementById('psram').textContent=s.psram_mb+' МБ, свободно '+s.psram_free_kb+' КБ';
     if(s.playing) document.getElementById('playback').textContent='Воспроизведение: '+s.playback_bytes+' байт';
+    document.getElementById('recStatus').textContent=(s.recording?(s.record_stopping?'Завершение':'Идёт запись'):'Остановлено')+' · '+s.record_bytes+' байт'+(s.record_error?' · '+s.record_error:'');
     document.getElementById('error').textContent=s.error||'';
   } catch(e) {document.getElementById('error').textContent=String(e);}
 }
@@ -363,11 +532,22 @@ void setup() {
   server.on("/api/reference/ogg", HTTP_POST, handleUploadComplete, handleUploadChunk);
   server.on("/api/reference/ogg", HTTP_GET, handleOggDownload);
   server.on("/api/reference", HTTP_GET, handleReferenceDownload);
+  server.on("/api/record/start",HTTP_POST,startRecording);
+  server.on("/api/record/stop",HTTP_POST,requestStopRecording);
+  server.on("/api/record/file",HTTP_GET,[](){
+    if(recording || !sdReady || !SD.exists("/recording.ogg")){
+      server.send(404,"text/plain","No completed recording"); return;
+    }
+    File f=SD.open("/recording.ogg",FILE_READ);
+    if(!f){server.send(500,"text/plain","SD error");return;}
+    server.streamFile(f,"audio/ogg");f.close();
+  });
   server.begin();
 }
 
 void loop() {
   server.handleClient();
   servicePlayback();
+  serviceRecording();
   delay(1);
 }
