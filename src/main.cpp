@@ -241,7 +241,7 @@ void startRecording() {
   recordBytes = 0;
   // Recorder initialization resets decoder and loads application from SD.
   if (!writeSci(0x03,0xC000) || !writeSci(0x02,0) ||
-      !writeSci(0x00,0x0804)) {
+      !writeSci(0x00,0x0800)) {
     server.send(500,"text/plain","Ошибка инициализации VS1053"); return;
   }
   if (!writeSci(0x0A,0) || !writeSci(0x07,0xC01A) ||
@@ -256,7 +256,7 @@ void startRecording() {
   recordFile = SD.open("/recording.part",FILE_WRITE);
   if (!recordFile) { server.send(500,"text/plain","SD open failed"); return; }
   // Mic input: SM_LINE1=0; SM_ADPCM | SM_SDINEW.
-  if (!writeSci(0x00,0x1004) || !writeSci(0x0C,0x8000) ||
+  if (!writeSci(0x00,0x1800) || !writeSci(0x0C,0) ||
       !writeSci(0x0D,1024) || !writeSci(0x0E,0) ||
       !writeSci(0x0F,0) || !writeSci(0x0A,entry)) {
     abortRecording("Не удалось запустить encoder");
@@ -416,9 +416,9 @@ button{background:#4b78e8;border:0;border-radius:10px;padding:12px 18px;color:wh
 <p class="muted">Поместите файл test.mp3 в корень microSD. Подключите наушники.</p>
 <button onclick="audio('/api/play')">Воспроизвести test.mp3</button>
 <button onclick="audio('/api/stop')">Остановить</button>
-<p id="playback">—</p></div>
+<button onclick="audio('/api/play/ogg')">Воспроизвести reference.ogg</button><p id="playback">—</p></div>
 <div class="card"><h2>Запись вокала</h2>
-<p class="muted">Появится после проверки аппаратного подключения и микрофонного тракта.</p></div>
+<p class="muted">Запись PCM 24 кГц; на SD нужен vs1053b_24k_l.img.</p><button onclick="audio('/api/record/start')">Записать WAV</button><button onclick="audio('/api/record/stop')">Стоп записи</button><p id="recStatus">—</p><a href="/api/record/file" style="color:#93c5fd">Скачать WAV</a></div>
 <p><a href="/analysis" style="color:#93c5fd">Анализ вокала: ноты и громкость →</a></p>
 <div class="card"><h2>Анализ на ESP32-S3</h2>
 <p class="muted">Обрабатывает reference.wav (моно PCM16, 8–48 кГц) без браузера. Ogg пока требует декодера.</p>
@@ -572,12 +572,12 @@ void setup() {
   server.on("/api/play/ogg",HTTP_POST,startPlayback);
   server.on("/api/record/stop",HTTP_POST,requestStopRecording);
   server.on("/api/record/file",HTTP_GET,[](){
-    if(recording || !sdReady || !SD.exists("/recording.ogg")){
+    if(recording || !sdReady || !SD.exists("/recording.wav")){
       server.send(404,"text/plain","No completed recording"); return;
     }
-    File f=SD.open("/recording.ogg",FILE_READ);
+    File f=SD.open("/recording.wav",FILE_READ);
     if(!f){server.send(500,"text/plain","SD error");return;}
-    server.streamFile(f,"audio/ogg");f.close();
+    server.streamFile(f,"audio/wav");f.close();
   });
   server.begin();
 }
