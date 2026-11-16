@@ -22,7 +22,7 @@ function pitchOf(a,sr){
  for(let lag=1;lag<=maxLag;lag++){
   cumulative+=d[lag];if(lag<minLag||!cumulative)continue;
   const val=d[lag]*lag/cumulative;
-  if(val<0.13){best=lag;while(best<maxLag && d[best+1]*(best+1)/cumulative<val)best++;break;}
+  if(val<0.13){best=lag;break;}
   if(val<bestVal){bestVal=val;best=lag;}
  }
  if(best<minLag)return {hz:null,confidence:0};
