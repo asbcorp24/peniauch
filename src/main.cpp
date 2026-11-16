@@ -18,6 +18,10 @@ File playbackFile;
 bool playing = false;
 String playbackError;
 uint32_t playbackBytes = 0;
+File uploadFile;
+bool uploadFailed = false;
+size_t uploadBytes = 0;
+constexpr size_t MAX_UPLOAD_BYTES = 12 * 1024 * 1024;
 uint16_t statusRegister = 0xFFFF;
 uint8_t codecVersion = 0;
 String codecError;
@@ -135,6 +139,60 @@ void startPlayback() {
   server.send(200, "text/plain; charset=utf-8", "Воспроизведение началось");
 }
 
+void handleUploadChunk() {
+  HTTPUpload &u = server.upload();
+  if (u.status == UPLOAD_FILE_START) {
+    stopPlayback();
+    uploadFailed = !sdReady;
+    uploadBytes = 0;
+    if (uploadFile) uploadFile.close();
+    if (!uploadFailed) {
+      SD.remove("/reference.wav");
+      uploadFile = SD.open("/reference.wav", FILE_WRITE);
+      uploadFailed = !uploadFile;
+    }
+  } else if (u.status == UPLOAD_FILE_WRITE) {
+    if (!uploadFailed) {
+      uploadBytes += u.currentSize;
+      if (uploadBytes > MAX_UPLOAD_BYTES ||
+          uploadFile.write(u.buf, u.currentSize) != u.currentSize) {
+        uploadFailed = true;
+      }
+    }
+  } else if (u.status == UPLOAD_FILE_END || u.status == UPLOAD_FILE_ABORTED) {
+    if (uploadFile) uploadFile.close();
+    if (u.status == UPLOAD_FILE_ABORTED || uploadFailed) {
+      SD.remove("/reference.wav");
+      uploadFailed = true;
+    }
+  }
+}
+
+void handleUploadComplete() {
+  if (uploadFile) uploadFile.close();
+  if (uploadFailed || uploadBytes == 0) {
+    SD.remove("/reference.wav");
+    server.send(400, "text/plain; charset=utf-8", "Ошибка записи или размер превышает 12 МБ");
+    return;
+  }
+  server.send(200, "text/plain; charset=utf-8", "Эталон сохранён: " + String(uploadBytes) + " байт");
+}
+
+void handleReferenceDownload() {
+  if (!sdReady || !SD.exists("/reference.wav")) {
+    server.send(404, "text/plain; charset=utf-8", "Эталон отсутствует");
+    return;
+  }
+  stopPlayback();
+  File file = SD.open("/reference.wav", FILE_READ);
+  if (!file) {
+    server.send(500, "text/plain", "SD read error");
+    return;
+  }
+  server.streamFile(file, "audio/wav");
+  file.close();
+}
+
 String jsonStatus() {
   String out = "{";
   out += "\"codec_ok\":" + String(codecReady ? "true" : "false");
@@ -181,6 +239,39 @@ button{background:#4b78e8;border:0;border-radius:10px;padding:12px 18px;color:wh
 <p class="muted">Появится после проверки аппаратного подключения и микрофонного тракта.</p></div>
 <button onclick="refresh()">Обновить</button>
 <script>
+async function uploadWav(){
+  const f=document.getElementById('wav').files[0];
+  const msg=document.getElementById('uploadStatus');
+  if(!f){msg.textContent='Выберите WAV';return;}
+  if(f.size>12*1024*1024){msg.textContent='Файл больше 12 МБ';return;}
+  const fd=new FormData();fd.append('file',f);
+  msg.textContent='Загрузка...';
+  try {
+    const r=await fetch('/api/reference',{method:'POST',body:fd});
+    msg.textContent=await r.text();
+    if(r.ok) await drawWav(f);
+  }catch(e){msg.textContent=String(e);}
+}
+async function drawWav(file){
+  try {
+    const ctx=new (window.AudioContext||window.webkitAudioContext)();
+    const buffer=await ctx.decodeAudioData(await file.arrayBuffer());
+    const data=buffer.getChannelData(0);
+    const canvas=document.getElementById('wave'),g=canvas.getContext('2d');
+    g.clearRect(0,0,canvas.width,canvas.height);
+    g.strokeStyle='#60a5fa';g.lineWidth=2;g.beginPath();
+    for(let x=0;x<canvas.width;x++){
+      const a=Math.floor(x*data.length/canvas.width);
+      const b=Math.max(a+1,Math.floor((x+1)*data.length/canvas.width));
+      let sum=0;
+      for(let i=a;i<b;i++)sum+=data[i]*data[i];
+      const rms=Math.sqrt(sum/(b-a));
+      const y=canvas.height- Math.min(1,rms*3)*canvas.height;
+      if(x===0)g.moveTo(x,y);else g.lineTo(x,y);
+    }
+    g.stroke();await ctx.close();
+  }catch(e){document.getElementById('uploadStatus').textContent='Анализ WAV: '+e;}
+}
 async function audio(path){
   try { const r=await fetch(path,{method:'POST'}); document.getElementById('playback').textContent=await r.text(); }
   catch(e){document.getElementById('playback').textContent=String(e);}
@@ -245,6 +336,8 @@ void setup() {
     stopPlayback();
     server.send(200, "text/plain; charset=utf-8", "Остановлено");
   });
+  server.on("/api/reference", HTTP_POST, handleUploadComplete, handleUploadChunk);
+  server.on("/api/reference", HTTP_GET, handleReferenceDownload);
   server.begin();
 }
 
