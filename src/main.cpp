@@ -384,10 +384,10 @@ String jsonStatus() {
   out += ",\"psram_free_kb\":" + String(ESP.getFreePsram() / 1024);
   out += ",\"playing\":" + String(playing ? "true" : "false");
   out += ",\"playback_bytes\":" + String(playbackBytes);
-  out += ",\\"recording\\":" + String(recording ? "true" : "false");
-  out += ",\\"record_stopping\\":" + String(stoppingRecord ? "true" : "false");
-  out += ",\\"record_bytes\\":" + String(recordBytes);
-  out += ",\\"record_error\\":\\"" + recordError + "\\"";
+  out += ",\"recording\":" + String(recording ? "true" : "false");
+  out += ",\"record_stopping\":" + String(stoppingRecord ? "true" : "false");
+  out += ",\"record_bytes\":" + String(recordBytes);
+  out += ",\"record_error\":\"" + recordError + "\"";
   out += "}";
   return out;
 }
